@@ -5,6 +5,12 @@ import joblib
 import re
 from sklearn.ensemble import IsolationForest
 
+# PDF + OCR
+import pdfplumber
+from pdf2image import convert_from_bytes
+import pytesseract
+from PIL import Image
+
 # Load models
 model = joblib.load("model.pkl")
 scaler = joblib.load("scaler.pkl")
@@ -12,41 +18,95 @@ nlp_model = joblib.load("nlp_model.pkl")
 vectorizer = joblib.load("vectorizer.pkl")
 
 st.set_page_config(page_title="Financial Risk Analyzer", layout="wide")
-
 st.title("💳 Personal Financial Risk Analyzer")
 
-# Upload
-uploaded_file = st.file_uploader("Upload Bank Statement", type=["csv", "xlsx"])
+# Upload options
+uploaded_file = st.file_uploader("Upload CSV / Excel / PDF", type=["csv", "xlsx", "pdf"])
 
-# Clean text
+# ---------------- TEXT CLEANING ----------------
 def clean_text(text):
     text = str(text).lower()
     text = re.sub(r'[^a-zA-Z ]', ' ', text)
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
-# NLP categorization
+# ---------------- NLP CATEGORY ----------------
 def predict_category(desc):
     desc = clean_text(desc)
     vec = vectorizer.transform([desc])
     return nlp_model.predict(vec)[0]
 
+# ---------------- PDF TEXT EXTRACTION ----------------
+def extract_text_from_pdf(file):
+    text = ""
+    with pdfplumber.open(file) as pdf:
+        for page in pdf.pages:
+            t = page.extract_text()
+            if t:
+                text += t + "\n"
+    return text
+
+def extract_text_from_image_pdf(file):
+    images = convert_from_bytes(file.read())
+    text = ""
+    for img in images:
+        text += pytesseract.image_to_string(img) + "\n"
+    return text
+
+def extract_text(file):
+    try:
+        text = extract_text_from_pdf(file)
+        if text.strip():
+            return text
+    except:
+        pass
+    return extract_text_from_image_pdf(file)
+
+# ---------------- TEXT → DATAFRAME ----------------
+def text_to_df(text):
+    lines = text.split("\n")
+    data = []
+
+    for line in lines:
+        parts = line.split()
+        if len(parts) >= 3:
+            date = parts[0]
+            amount = parts[-1]
+            desc = " ".join(parts[1:-1])
+
+            try:
+                amount = float(amount.replace(",", ""))
+                data.append([date, desc, amount])
+            except:
+                continue
+
+    return pd.DataFrame(data, columns=["Date", "Description", "Amount"])
+
+# ---------------- MAIN PIPELINE ----------------
 if uploaded_file:
+
+    # 🔹 CSV / Excel
     if uploaded_file.name.endswith(".csv"):
         df = pd.read_csv(uploaded_file)
-    else:
+
+    elif uploaded_file.name.endswith(".xlsx"):
         df = pd.read_excel(uploaded_file)
 
-    st.subheader("📄 Raw Data")
+    # 🔹 PDF
+    elif uploaded_file.name.endswith(".pdf"):
+        text = extract_text(uploaded_file)
+        df = text_to_df(text)
+
+    st.subheader("📄 Extracted Data")
     st.dataframe(df)
 
-    # Categorize
+    # Categorization
     df["Category"] = df["Description"].apply(predict_category)
 
     st.subheader("📊 Categorized Data")
     st.dataframe(df)
 
-    # Financial features
+    # ---------------- FEATURE ENGINEERING ----------------
     income = df[df["Amount"] > 0]["Amount"].sum()
     expenses = abs(df[df["Amount"] < 0]["Amount"].sum())
     savings = income - expenses
@@ -61,7 +121,7 @@ if uploaded_file:
 
     features = scaler.transform(features)
 
-    # Prediction
+    # ---------------- PREDICTION ----------------
     prediction = model.predict_proba(features)[0][1]
     risk_score = int(prediction * 100)
 
@@ -82,39 +142,42 @@ if uploaded_file:
     else:
         st.success("🟢 Stable")
 
-    # Anomaly Detection
+    # ---------------- ANOMALY DETECTION ----------------
     iso = IsolationForest(contamination=0.05)
     df["Anomaly"] = iso.fit_predict(df[["Amount"]])
 
     st.subheader("🚨 Unusual Transactions")
     st.dataframe(df[df["Anomaly"] == -1])
 
-    # Trends
-    df["Date"] = pd.to_datetime(df["Date"])
-    df["Month"] = df["Date"].dt.month
+    # ---------------- TRENDS ----------------
+    try:
+        df["Date"] = pd.to_datetime(df["Date"], errors='coerce')
+        df["Month"] = df["Date"].dt.month
 
-    st.subheader("📈 Monthly Trend")
-    st.line_chart(df.groupby("Month")["Amount"].sum())
+        st.subheader("📈 Monthly Trend")
+        st.line_chart(df.groupby("Month")["Amount"].sum())
+    except:
+        st.warning("Date format issue in PDF data")
 
-    # Category spending
+    # ---------------- CATEGORY GRAPH ----------------
     st.subheader("📊 Spending by Category")
     st.bar_chart(df[df["Amount"] < 0].groupby("Category")["Amount"].sum().abs())
 
-    # Suggestions
+    # ---------------- SUGGESTIONS ----------------
     st.subheader("💡 Recommendations")
 
     if risk_score > 70:
-        st.info("Reduce non-essential spending and focus on debt reduction.")
+        st.info("Reduce unnecessary spending and focus on debt repayment.")
     elif risk_score > 40:
-        st.info("Track spending and increase savings.")
+        st.info("Track expenses and increase savings.")
     else:
         st.info("You are financially stable. Consider investing.")
 
-    # Insights
+    # ---------------- INSIGHTS ----------------
     st.subheader("📌 Insights")
     st.write(f"Savings Ratio: {savings_ratio:.2f}")
     st.write(f"Expense Ratio: {expense_ratio:.2f}")
     st.write(f"Debt Ratio: {debt_income_ratio:.2f}")
 
 else:
-    st.info("👆 Upload a file to begin analysis")
+    st.info("👆 Upload CSV, Excel, or PDF to begin")
