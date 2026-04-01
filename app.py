@@ -20,7 +20,7 @@ vectorizer = joblib.load("vectorizer.pkl")
 st.set_page_config(page_title="Financial Risk Analyzer", layout="wide")
 st.title("💳 Personal Financial Risk Analyzer")
 
-# Upload options
+# Upload
 uploaded_file = st.file_uploader("Upload CSV / Excel / PDF", type=["csv", "xlsx", "pdf"])
 
 # ---------------- TEXT CLEANING ----------------
@@ -30,13 +30,13 @@ def clean_text(text):
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
-# ---------------- NLP CATEGORY ----------------
+# ---------------- NLP ----------------
 def predict_category(desc):
     desc = clean_text(desc)
     vec = vectorizer.transform([desc])
     return nlp_model.predict(vec)[0]
 
-# ---------------- PDF TEXT EXTRACTION ----------------
+# ---------------- PDF HANDLING ----------------
 def extract_text_from_pdf(file):
     text = ""
     with pdfplumber.open(file) as pdf:
@@ -62,7 +62,7 @@ def extract_text(file):
         pass
     return extract_text_from_image_pdf(file)
 
-# ---------------- TEXT → DATAFRAME ----------------
+# ---------------- TEXT → DF ----------------
 def text_to_df(text):
     lines = text.split("\n")
     data = []
@@ -82,31 +82,69 @@ def text_to_df(text):
 
     return pd.DataFrame(data, columns=["Date", "Description", "Amount"])
 
-# ---------------- MAIN PIPELINE ----------------
+# ---------------- MAIN ----------------
 if uploaded_file:
 
-    # 🔹 CSV / Excel
+    # -------- FILE HANDLING --------
     if uploaded_file.name.endswith(".csv"):
         df = pd.read_csv(uploaded_file)
 
     elif uploaded_file.name.endswith(".xlsx"):
         df = pd.read_excel(uploaded_file)
 
-    # 🔹 PDF
     elif uploaded_file.name.endswith(".pdf"):
         text = extract_text(uploaded_file)
         df = text_to_df(text)
 
-    st.subheader("📄 Extracted Data")
+    # -------- STANDARDIZE COLUMNS --------
+    df.columns = df.columns.str.strip().str.lower()
+
+    # Description mapping
+    if "transaction details" in df.columns:
+        df["Description"] = df["transaction details"]
+    elif "description" in df.columns:
+        df["Description"] = df["description"]
+    else:
+        st.error("❌ No description column found")
+        st.stop()
+
+    # Amount mapping
+    if "amount" in df.columns:
+        df["Amount"] = df["amount"]
+    else:
+        st.error("❌ No amount column found")
+        st.stop()
+
+    # Date mapping
+    if "date" in df.columns:
+        df["Date"] = df["date"]
+
+    # -------- CLEAN AMOUNT --------
+    df["Amount"] = df["Amount"].astype(str)
+    df["Amount"] = df["Amount"].str.replace(",", "").str.replace("₹", "")
+    df["Amount"] = pd.to_numeric(df["Amount"], errors="coerce")
+
+    # -------- FIX CREDIT / DEBIT --------
+    df["Amount"] = df.apply(
+        lambda x: -abs(x["Amount"]) if any(word in str(x["Description"]).lower()
+        for word in ["paid", "sent", "debit", "dr"]) else abs(x["Amount"]),
+        axis=1
+    )
+
+    # -------- USE TAGS (PAYTM BONUS) --------
+    if "tags" in df.columns:
+        df["Description"] = df["Description"] + " " + df["tags"].astype(str)
+
+    st.subheader("📄 Processed Data")
     st.dataframe(df)
 
-    # Categorization
+    # -------- NLP CATEGORY --------
     df["Category"] = df["Description"].apply(predict_category)
 
     st.subheader("📊 Categorized Data")
     st.dataframe(df)
 
-    # ---------------- FEATURE ENGINEERING ----------------
+    # -------- FEATURE ENGINEERING --------
     income = df[df["Amount"] > 0]["Amount"].sum()
     expenses = abs(df[df["Amount"] < 0]["Amount"].sum())
     savings = income - expenses
@@ -121,7 +159,7 @@ if uploaded_file:
 
     features = scaler.transform(features)
 
-    # ---------------- PREDICTION ----------------
+    # -------- PREDICTION --------
     prediction = model.predict_proba(features)[0][1]
     risk_score = int(prediction * 100)
 
@@ -142,14 +180,14 @@ if uploaded_file:
     else:
         st.success("🟢 Stable")
 
-    # ---------------- ANOMALY DETECTION ----------------
+    # -------- ANOMALY DETECTION --------
     iso = IsolationForest(contamination=0.05)
     df["Anomaly"] = iso.fit_predict(df[["Amount"]])
 
     st.subheader("🚨 Unusual Transactions")
     st.dataframe(df[df["Anomaly"] == -1])
 
-    # ---------------- TRENDS ----------------
+    # -------- TRENDS --------
     try:
         df["Date"] = pd.to_datetime(df["Date"], errors='coerce')
         df["Month"] = df["Date"].dt.month
@@ -157,13 +195,13 @@ if uploaded_file:
         st.subheader("📈 Monthly Trend")
         st.line_chart(df.groupby("Month")["Amount"].sum())
     except:
-        st.warning("Date format issue in PDF data")
+        st.warning("Date format issue")
 
-    # ---------------- CATEGORY GRAPH ----------------
+    # -------- CATEGORY GRAPH --------
     st.subheader("📊 Spending by Category")
     st.bar_chart(df[df["Amount"] < 0].groupby("Category")["Amount"].sum().abs())
 
-    # ---------------- SUGGESTIONS ----------------
+    # -------- RECOMMENDATIONS --------
     st.subheader("💡 Recommendations")
 
     if risk_score > 70:
@@ -173,7 +211,7 @@ if uploaded_file:
     else:
         st.info("You are financially stable. Consider investing.")
 
-    # ---------------- INSIGHTS ----------------
+    # -------- INSIGHTS --------
     st.subheader("📌 Insights")
     st.write(f"Savings Ratio: {savings_ratio:.2f}")
     st.write(f"Expense Ratio: {expense_ratio:.2f}")
